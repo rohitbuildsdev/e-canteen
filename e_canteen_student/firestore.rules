@@ -1,0 +1,73 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isCanteenStaff() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/canteen_staff/$(request.auth.uid))
+        && get(/databases/$(database)/documents/canteen_staff/$(request.auth.uid)).data.active == true;
+    }
+
+    match /connection_tests/{document} {
+      allow read, write: if signedIn();
+    }
+
+    match /canteen_staff/{staffId} {
+      allow read: if isCanteenStaff() && request.auth.uid == staffId;
+      allow write: if false;
+    }
+
+    match /menu_items/{itemId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isCanteenStaff();
+    }
+
+    match /orders/{orderId} {
+      // Students can only read their own orders; approved staff can see the queue.
+      allow read: if signedIn() &&
+        (resource.data.studentUid == request.auth.uid || isCanteenStaff());
+
+      // Student app may create an order only for its signed-in user.
+      allow create: if signedIn()
+        && request.resource.data.studentUid == request.auth.uid
+        && request.resource.data.studentName is string
+        && request.resource.data.studentId is string
+        && request.resource.data.items is list
+        && request.resource.data.items.size() > 0
+        && request.resource.data.total is number
+        && request.resource.data.total >= 0
+        && request.resource.data.status == 'newOrder';
+
+      // Students can only cancel their own new orders. Staff can advance valid states.
+      allow update: if signedIn() && (
+        (resource.data.studentUid == request.auth.uid
+          && resource.data.status == 'newOrder'
+          && request.resource.data.status == 'cancelled'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']))
+        || (isCanteenStaff()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt'])
+          && (
+            (resource.data.status == 'newOrder' && request.resource.data.status == 'confirmed')
+            || (resource.data.status == 'confirmed' && request.resource.data.status == 'preparing')
+            || (resource.data.status == 'preparing' && request.resource.data.status == 'ready')
+            || (resource.data.status == 'ready' && request.resource.data.status == 'collected')
+            || ((resource.data.status == 'newOrder' || resource.data.status == 'confirmed') && request.resource.data.status == 'cancelled')
+          ))
+      );
+
+      allow delete: if false;
+    }
+
+    // Student approval registry and profile records are server/admin managed.
+    match /student_registry/{regNo} {
+      allow read, write: if false;
+    }
+    match /student_profiles/{uid} {
+      allow read, write: if false;
+    }
+  }
+}
